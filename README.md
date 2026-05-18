@@ -1,243 +1,186 @@
-# Financial Fraud Detection Using Machine Learning
+# Financial Fraud Detection using Machine Learning
 
-An end-to-end machine learning project for detecting fraudulent financial transactions using the IEEE-CIS Fraud Detection dataset. The project compares Logistic Regression, Random Forest, and XGBoost, then improves the final system through probability calibration, threshold tuning, and SHAP-based interpretability.
+This project builds a fraud detection pipeline on the IEEE-CIS dataset using the two source files `train_transaction.csv` and `train_identity.csv`. The implementation is contained in a single `main.py` script that loads the data, engineers fraud-oriented features, trains an XGBoost model, calibrates predicted probabilities, chooses an operating threshold, evaluates performance, and explains predictions with SHAP.
 
-The pipeline is designed for highly imbalanced tabular fraud data and emphasizes three things: leakage-safe preprocessing, recall-oriented model optimization, and explainable predictions.
+## Project Overview
 
-## Problem Statement
+The goal is to classify each transaction as fraudulent (`isFraud = 1`) or legitimate (`isFraud = 0`). The pipeline is designed for a highly imbalanced dataset, so it focuses more on recall, PR-AUC, and practical fraud-catching ability than on raw accuracy.
 
-The task is binary classification: predict whether a transaction is fraudulent (`isFraud = 1`) or legitimate (`isFraud = 0`). The dataset is difficult because it is highly imbalanced, time-ordered, high-dimensional after merging transaction and identity tables, and sensitive to temporal leakage if split incorrectly.
+Unlike a multi-file production repository, this version is a code-complete research project centered around one main script. The workflow is still modular inside that script, with distinct sections for loading, preprocessing, feature engineering, training, calibration, evaluation, and explainability.
 
-The report states that only about 3.5% of transactions are fraudulent, which makes accuracy alone misleading and shifts focus toward recall, PR-AUC, and cost-sensitive evaluation.
+## Dataset Used
 
-## Dataset
+The project uses these two CSV files as input:
 
-This project uses the IEEE-CIS Fraud Detection dataset released by Vesta Corporation for the 2019 Kaggle competition.
+- `train_transaction.csv`
+- `train_identity.csv`
 
-Key details from the report:
+These are merged using `TransactionID` with a left join, so all transaction rows are preserved even when identity information is missing.
 
-- 590,540 transaction rows.
-- 394 transaction features and 41 identity features before filtering.
-- Join key: `TransactionID`.
-- Time column: `TransactionDT`.
-- Target column: `isFraud`.
+## What `main.py` does
 
-## Pipeline
+The `main.py` file performs the full end-to-end workflow:
 
-The implementation follows a modular chronological pipeline described in the report.
-
-1. Load `train_transaction.csv` and `train_identity.csv`.
-2. Merge both tables using `TransactionID`.
-3. Drop columns with more than 55% missing values.
-4. Sort by `TransactionDT` and split chronologically into 80% train, 10% calibration, and 10% test.
-5. Perform leakage-safe feature engineering and imputation using training-set statistics only.
-6. Apply label encoding with unseen-value handling.
-7. Remove near-zero-variance features.
-8. Train baseline and advanced models.
-9. Calibrate probabilities using isotonic regression.
-10. Select the final operating threshold using the Precision-Recall curve and F2 score.
-11. Evaluate on the held-out test set.
-12. Use SHAP for global and local interpretability.
+1. Loads `train_transaction.csv` and `train_identity.csv`.
+2. Merges them on `TransactionID`.
+3. Drops columns with more than 55% missing values.
+4. Fills numeric nulls with median values and categorical nulls with `"missing"`.
+5. Sorts records chronologically using `TransactionDT`.
+6. Splits the data into 80% train, 10% calibration, and 10% test.
+7. Engineers domain-specific fraud features.
+8. Encodes categorical columns using `LabelEncoder`.
+9. Drops near-zero variance numeric columns.
+10. Trains an XGBoost classifier with fraud-weighted samples.
+11. Calibrates probabilities using isotonic regression.
+12. Selects the best threshold from the precision-recall tradeoff.
+13. Evaluates on the test set using classification metrics and confusion matrix.
+14. Generates SHAP-based feature importance and local explanation plots.
 
 ## Feature Engineering
 
-The report highlights several custom fraud-oriented features that improved model quality.
+A major part of the project is custom feature engineering. The script creates behavior-based and anomaly-based features such as:
 
-- `logTransactionAmt`: log transform of transaction amount.
-- `hour`, `dayofweek`, `isnight`: temporal behavior indicators.
-- `card1meanamt`, `card1stdamt`, `amtToMean`, `amtDev`: personalized spending anomaly features.
-- `timeSinceLast`, `card1TxnVelocity`, `uidCount`: velocity and repeat-use indicators.
-- `cardAddr`, `uid`, `PREmailMatch`, `D1NullFlag`: identity-consistency and missingness signals.
+- `logTransactionAmt`
+- `amtIsRound`
+- `amtIs1Dollar`
+- `hour`, `dayOfWeek`, `isWeekend`, `isNight`, `isBusinessHour`
+- cyclical time features like `hourSin`, `hourCos`, `dowSin`, `dowCos`
+- per-card spending statistics like mean, std, count, and median
+- deviation features such as `amtToMean`, `amtDev`, `amtZScore`
+- identity combination features like card-address combinations
+- transaction velocity features such as `timeSinceLast`, `logTimeSinceLast`, `isRapidTxn`, `card1Count1h`, `card1Count24h`, `card1TxnVelocity`
+- high-amount flags like `isHighAmt` and `isExtremeAmt`
+- email match and frequency features
+- product, billing address, device, and fraud-rate encoded features
+- anonymized feature standardization for `C*` and `D*` columns
+- mismatch summary features for `M*` columns
 
-The report notes that five of the top ten SHAP-important features were engineered by the team, supporting the value of domain-specific feature creation.
+These features are fitted on training data and then applied forward to calibration and test data to reduce leakage.
 
-## Models
+## Model Used
 
-### 1) Logistic Regression
+The final model in `main.py` is `XGBClassifier` from XGBoost with settings tuned for imbalanced fraud detection. The script uses:
 
-Used as the baseline to quantify the effect of extreme class imbalance and test linear separability.
+- `n_estimators=3000`
+- `learning_rate=0.02`
+- `max_depth=6`
+- `subsample=0.80`
+- `colsample_bytree=0.70`
+- `colsample_bylevel=0.70`
+- `colsample_bynode=0.70`
+- `reg_alpha=2`
+- `reg_lambda=2`
+- `min_child_weight=3`
+- `gamma=0.1`
+- `eval_metric='aucpr'`
+- `tree_method='hist'`
+- `device='cuda'`
+- `early_stopping_rounds=100`
 
-Reported results:
+Fraud samples are upweighted using custom sample weights, with fraud transactions receiving a weight multiplier of `25.0`.
 
-- Recall: 0.35.
-- Precision: 0.62.
-- PR-AUC: 0.79.
-- ROC-AUC: 0.79.
+## Probability Calibration
 
-### 2) Random Forest
+After model training, the script calibrates prediction probabilities using `CalibratedClassifierCV` with:
 
-Used as the intermediate non-linear model to capture interactions missed by Logistic Regression.
+- `method='isotonic'`
+- `cv='prefit'`
 
-Reported results:
+This step is important because weighted training improves recall but can distort raw probability estimates.
 
-- Recall: 0.68.
-- Precision: 0.73.
-- PR-AUC: 0.88.
-- ROC-AUC: 0.91.
-- Training time: about 50 minutes, with roughly 14 GB RAM usage.
+## Threshold Selection
 
-### 3) XGBoost
+The model does not rely on the default threshold of `0.5`. Instead, it computes a precision-recall curve on the calibration split and selects a threshold using an F2-style objective, where recall matters more than precision.
 
-Selected as the final model because of regularization, efficient histogram-based tree building, early stopping, and strong performance on imbalanced tabular data.
+The code also applies a target precision preference (`TARGET_PRECISION = 0.80`) and prints threshold tradeoffs so the operating point can be adjusted depending on business needs.
 
-Reported results:
+## Evaluation
 
-- Default threshold recall: 0.72.
-- Default threshold precision: 0.81.
-- PR-AUC: 0.93-0.95.
-- ROC-AUC: 0.96.
-- Training time: about 10 minutes.
+The script evaluates the chosen threshold on the test set using:
 
-## Threshold Tuning
+- classification report
+- confusion matrix
+- ROC-AUC
+- PR-AUC
+- fraud alert precision
+- fraud catch rate / recall
 
-Instead of using the default 0.5 classification threshold, the final system calibrates probabilities with isotonic regression and then selects an F2-optimal threshold from the Precision-Recall curve.
+It also prints a practical interpretation, such as how many of the flagged transactions are actually fraud and how many fraud cases are being caught.
 
-The report identifies an optimal threshold near 0.18, producing about 0.90-0.91 recall with precision in the 0.55-0.65 range.
+## Explainability
 
-This threshold choice is justified because missing a fraud case is significantly costlier than incorrectly flagging a legitimate transaction.
+The project uses SHAP (`shap.TreeExplainer`) for interpretability. The script generates:
 
-## Final Results
+- SHAP summary bar plot
+- SHAP summary dot plot
+- SHAP force plot for an individual prediction
 
-At the selected operating point, the system achieves strong fraud recall while remaining practical for analyst review workflows.
+This helps explain which features are pushing predictions toward fraud or non-fraud.
 
-Key reported outcomes:
+## Tech Stack
 
-- Fraud recall: about 0.90-0.91.
-- Fraud precision: about 0.57-0.65.
-- F1-score (fraud class): about 0.70.
-- PR-AUC: about 0.93-0.95.
-- ROC-AUC: about 0.96.
+- Python
+- pandas
+- numpy
+- matplotlib
+- seaborn
+- scikit-learn
+- XGBoost
+- SHAP
 
-The report also emphasizes that threshold optimization improved recall almost as much as changing model family, which is an important practical takeaway.
-
-## Interpretability
-
-SHAP was used for both global and local explanation of the final XGBoost model.
-
-The most influential signals included `amtToMean`, `logTransactionAmt`, `uidMeanAmt`, `card1MeanAmt`, `timeSinceLast`, `card1TxnVelocity`, and `isnight`.
-
-These explanations helped verify that the model learned meaningful fraud patterns such as spending anomalies, unusual velocity, and suspicious transaction timing rather than relying on spurious shortcuts.
-
-## Suggested Repository Structure
+## File Structure
 
 ```text
-fraud-detection-ml/
-├── README.md
-├── requirements.txt
-├──.gitignore
-├── configs/
-│  └── config.yaml
-├── data/
-│  ├── raw/
-│  │  ├── train_transaction.csv
-│  │  └── train_identity.csv
-│  ├── processed/
-│  └── interim/
-├── notebooks/
-│  ├── 01_eda.ipynb
-│  ├── 02_feature_engineering.ipynb
-│  ├── 03_model_baseline_lr.ipynb
-│  ├── 04_model_random_forest.ipynb
-│  ├── 05_model_xgboost.ipynb
-│  ├── 06_threshold_tuning.ipynb
-│  └── 07_shap_analysis.ipynb
-├── src/
-│  ├── __init__.py
-│  ├── data_loader.py
-│  ├── preprocess.py
-│  ├── features.py
-│  ├── split.py
-│  ├── encode.py
-│  ├── train_baseline.py
-│  ├── train_random_forest.py
-│  ├── train_xgboost.py
-│  ├── calibrate.py
-│  ├── threshold.py
-│  ├── evaluate.py
-│  ├── explain.py
-│  └── utils.py
-├── artifacts/
-│  ├── models/
-│  ├── metrics/
-│  ├── figures/
-│  └── shap/
-└── docs/
-  └── report-assets/
+.
+├── main.py
+├── train_transaction.csv
+├── train_identity.csv
+└── README.md
 ```
 
-## Code File Order
+## How to Run
 
-A good order for writing or organizing the codebase is:
-
-1. `data_loader.py` - load and merge transaction and identity files.
-2. `split.py` - sort by `TransactionDT` and create chronological train/calibration/test splits.
-3. `preprocess.py` - null filtering, imputation, type handling, and column management.
-4. `features.py` - domain-specific feature engineering with train-only fit statistics.
-5. `encode.py` - label encoding with unseen-category handling.
-6. `train_baseline.py` - Logistic Regression baseline.
-7. `train_random_forest.py` - Random Forest benchmark.
-8. `train_xgboost.py` - two-stage XGBoost training and top-feature selection.
-9. `calibrate.py` - isotonic probability calibration.
-10. `threshold.py` - Precision-Recall analysis and F2-based threshold selection.
-11. `evaluate.py` - classification report, confusion matrix, PR-AUC, ROC-AUC.
-12. `explain.py` - SHAP global and local explanations.
-13. `utils.py` - shared helpers for saving artifacts, logging, and reproducibility.
-
-## Minimal Starter Files
-
-### `requirements.txt`
-
-```txt
-pandas>=2.0
-numpy>=1.24
-scikit-learn>=1.3
-xgboost>=3.2.0
-shap>=0.44
-matplotlib>=3.7
-seaborn>=0.12
-pyyaml>=6.0
-joblib>=1.3
-```
-
-### `.gitignore`
-
-```gitignore
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
-.env
-.venv/
-venv/
-data/raw/
-data/interim/
-data/processed/
-artifacts/models/
-artifacts/metrics/
-artifacts/figures/
-artifacts/shap/
-.DS_Store
-```
-
-## Example Run Order
+1. Place `main.py`, `train_transaction.csv`, and `train_identity.csv` in the same folder.
+2. Install the required packages.
+3. Run the script.
 
 ```bash
-python -m src.data_loader
-python -m src.split
-python -m src.preprocess
-python -m src.features
-python -m src.encode
-python -m src.train_baseline
-python -m src.train_random_forest
-python -m src.train_xgboost
-python -m src.calibrate
-python -m src.threshold
-python -m src.evaluate
-python -m src.explain
+pip install pandas numpy matplotlib seaborn scikit-learn xgboost shap
+python main.py
 ```
+
+## Expected Output
+
+Running the script will produce:
+
+- dataset shape and fraud-rate logs
+- train / calibration / test split information
+- XGBoost training progress
+- threshold analysis output
+- final classification metrics
+- confusion matrix visualization
+- precision-recall visualization
+- SHAP plots for global and local interpretation
 
 ## Notes
 
-- This project is designed as an offline batch fraud detection pipeline, not a real-time production fraud API.
-- The report explicitly lists real-time inference, graph-based methods, drift monitoring, federated learning, and an explainability dashboard as future enhancements.
-- If you publish this repository, do not upload the Kaggle dataset files directly; provide setup instructions instead.
+- The current implementation is built as an offline batch fraud detection workflow.
+- It is designed as a single-script project rather than a production API or package.
+- The script expects GPU support through `device='cuda'`; if GPU is unavailable, this can be changed to CPU.
+- Because the project uses chronological splitting and train-only fitted encoders/statistics, it is more realistic than a random-split notebook workflow.
 
+## Future Improvements
+
+Some strong next steps for this project would be:
+
+- split `main.py` into reusable modules
+- save trained models and encoders as artifacts
+- add a `requirements.txt`
+- add command-line arguments or config support
+- build a Streamlit dashboard for fraud analysis
+- create a real-time API for scoring new transactions
+- add experiment tracking and model versioning
+
+## Author Note
+
+This README is written to match the actual code structure of the project, where the full pipeline is implemented in `main.py` and the data sources are `train_transaction.csv` and `train_identity.csv`.
